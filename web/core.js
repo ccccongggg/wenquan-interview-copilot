@@ -1,3 +1,4 @@
+import { segmentLabel } from './participants.js';
 import { interviewContext, validateInterview, applyInterview, invalidateInterview, interviewMarkdown } from './interview.js';
 export const STATUS = { unknown: '未提及', vague: '仍含糊', stated: '具体陈述', conflict: '待核对差异' };
 export const KIND = { current: '当前做法', future: '未来期望', hypothesis: '假设', denial: '明确否定', unknown: '不知道' };
@@ -116,7 +117,7 @@ export function addSegment(session, text, source = 'manual') {
   const trimmed = String(text).trim();
   if (!trimmed || trimmed.length > 12000) throw new Error('请输入 1–12000 字的对话片段。');
   if (session.endedAt) throw new Error('这次访谈已结束，请先续接访谈。');
-  const segment = { id: uid(), sessionId: session.id, role: session.analysisVersion === 2 ? 'unknown' : session.role, original: trimmed, text: trimmed, source, createdAt: now(), revision: 0, edits: [], analyzedRevision: null };
+  const segment = { id: uid(), sessionId: session.id, role: session.analysisVersion === 2 ? 'unknown' : session.role, original: trimmed, text: trimmed, source, ...(session.phase ? {phase:session.phase,participantId:null,identityStatus:'pending'} : {}), createdAt: now(), revision: 0, edits: [], analyzedRevision: null };
   session.segments.push(segment);
   session.revision++;
   return segment;
@@ -125,6 +126,7 @@ export function correctSegment(session, id, text, role, roleSource = 'manual') {
   const seg = session.segments.find(s => s.id === id);
   if (!seg || !text.trim() || text.length > 12000) throw new Error('修正内容无效。');
   seg.edits.push({ text: seg.text, role: seg.role, at: now() });
+  if (session.identityMode === 'voice' && roleSource === 'manual') {seg.participantId=null;seg.identityStatus='unknown';}
   seg.text = text.trim(); seg.role = role.trim(); seg.roleSource = roleSource; seg.revision++; seg.analyzedRevision = null;
   // 对同一会话整体撤回派生结果，避免后续片段的判断间接依赖错误转写。
   session.events.push({ type: 'correction', segmentId: id, at: now(), priorClaims: clone(session.claims), priorQuestions: clone(session.questions), priorActions: clone(session.actions) });
@@ -141,7 +143,7 @@ export function itemStatus(session, itemId) {
   return 'unknown';
 }
 export function activeQuestion(session) {
-  if (session.paused || session.endedAt) return null;
+  if (session.paused || session.endedAt || session.phase === 'opening') return null;
   if (session.analysisVersion === 2) return session.questions.find(q => q.id === session.displayedQuestionId && q.status === 'displayed') || null;
   for (let i = session.questions.length - 1; i >= 0; i--) if (session.questions[i].status === 'suggested') return session.questions[i];
   return null;
@@ -236,7 +238,7 @@ export function exportMarkdown(topic) {
       for (const a of s.actions) lines.push(`- ${a.text}；负责人：${a.owner || '未明确'}；期限：${a.due || '未明确'}`, `  > ${a.quote}`);
     }
     lines.push('', '### 对话片段', '');
-    for (const seg of s.segments) lines.push(`#### ${seg.id} · ${seg.role} · ${seg.source === 'demo' ? '虚构演示' : seg.source === 'audio' ? '录音转写，待核对' : '手动文本'}`, '', seg.text, '', ...(seg.edits.length ? ['原始输入：', seg.original, `修正次数：${seg.edits.length}`, ''] : []));
+    for (const seg of s.segments) lines.push(`#### ${seg.id} · ${segmentLabel(s,seg)} · ${seg.phase==='opening'?'开场介绍':'正式访谈'} · ${seg.source === 'demo' ? '虚构演示' : seg.source === 'audio' ? '录音转写，待核对' : '手动文本'}`, '', seg.text, '', ...(seg.edits.length ? ['原始输入：', seg.original, `修正次数：${seg.edits.length}`, ''] : []));
   }
   if (topic.template === 'fde') lines.push('## FDE 发现草案', '', '第一版范围、当前流程、执行边界和验收条件，以以上具体陈述为依据；没有原话支持的事项仍待确认。未经客户核对，不作为获批范围或交付承诺。', '');
   return lines.join('\n');

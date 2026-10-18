@@ -1,3 +1,7 @@
+import { applyBackground } from './participant-background.js';
+import { configurePeople, applyIdentity, correctPerson, addManualPerson, introduction, startFormal } from './participants.js';
+import { VoiceAudio } from './voice-audio.js';
+import { voiceSettings, captureHostVoice } from './voice-settings.js';
 import { parseOutline, materialMarkdown } from './productivity.js';
 import { roleContext, applyRoles, summaryContext, validateSummary } from './intelligence.js';
 import { ensureInterviewSuggestion, interviewDisplay, interviewContext, availableQuestions, selectQuestion, questionFeedback, addHostQuestion, setChapter, bindSpeaker, invalidateInterview } from './interview.js';
@@ -44,6 +48,63 @@ let mobileHost = false;
 let modelProgress = null;
 let gatewayHealth = null;
 let resumeCaptureSessionId = null;
+let voiceStatusCheckedAt=0, voiceStatusRequest=null;
+let voiceStatus=null, voiceStage='idle', voiceMessage='', voiceController=null;
+const voiceRings=new Map();
+const identityTasks=new Set();
+let identityRequestChain=Promise.resolve();
+async function enrichBackground(session,segment,backend,token) {
+  const person=session.participants.find(p=>p.id===segment.participantId);
+  const ticket={participantId:person.id,revision:segment.revision,alias:person.alias||''};
+  try {
+    const {result}=await api('/api/participant-background',{participantId:person.id,segments:[{id:segment.id,participantId:person.id,text:segment.text}]},{backend,token,signal:lifetime.signal});
+    if(applyBackground(session,segment,result,ticket)){await save();if(current(state).session.id===session.id)render();}
+  }catch{ /* Background is optional; numbered identity and transcription remain usable. */ }
+}
+
+function renderVoice() { $('voice-settings-body').innerHTML=voiceSettings(voiceStatus,voiceStage,voiceMessage); }
+async function prepareVoiceStatus() {
+  if(voiceStatusRequest || voiceStatus || Date.now()-voiceStatusCheckedAt<30000 || !state.settings.backend)return;
+  voiceStatusCheckedAt=Date.now();
+  voiceStatusRequest=refreshVoiceStatus().catch(error=>{if($('prepare-voice-status'))$('prepare-voice-status').textContent=error.message;}).finally(()=>{voiceStatusRequest=null;});
+  return voiceStatusRequest;
+}
+async function refreshVoiceStatus() {
+  const backend=state.settings.backend, status=await api('/api/voice/status');
+  if(state.settings.backend!==backend)throw new Error('连接已变化，请重新检查声音服务。');
+  voiceStatus=status;
+  if($('prepare-voice-status'))$('prepare-voice-status').textContent=voiceStatus.host?.registered?'已录入，可重复使用':voiceStatus.ready?'还未录入':voiceStatus.reason||'未录入';
+  return voiceStatus;
+}
+async function resolveVoice(session, segment) {
+  if(session.identityMode!=='voice' || !segment.asr || segment.roleSource==='manual')return;
+  const ring=voiceRings.get(segment.asr.streamId), sample=ring?.sample(segment.asr.startMs,segment.asr.endMs);
+  if(!sample){segment.identityStatus='unknown';segment.identityReason='缺少有效单人音频或时间范围，请补充连续讲话。';void save();return;}
+  const ticket={sessionId:session.id,revision:segment.revision}, backend=state.settings.backend, token=gatewayToken();
+  const controller=new AbortController();
+  const task=(async()=>{
+    try {
+      const operation=identityRequestChain.catch(()=>{}).then(()=>{
+        if(closed || session.endedAt || session.paused || segment.revision!==ticket.revision || state.settings.backend!==backend)throw new Error('访谈或连接已变化，旧声音匹配已取消。');
+        return api('/api/voice/match',{sessionId:session.id,segmentId:segment.id,streamId:segment.asr.streamId,expectedGuests:session.expectedGuests,phase:segment.phase||session.phase,text:segment.text,allowNewGuest:(session.participants.filter(p=>p.role==='guest').length<session.expectedGuests),hasKnownGuests:session.participants.some(p=>p.role==='guest'),sample},{signal:controller.signal,backend,token});
+      });
+      identityRequestChain=operation;
+      const result=await operation;
+      if(closed || !applyIdentity(session,segment,result,ticket))return;
+      introduction(session,segment);
+      if(segment.phase==='opening' && segment.role==='guest' && /(?:我是|我叫|我负责|我担任|我的名字是|我的职业是|我的工作是)/.test(segment.text))void enrichBackground(session,segment,backend,token);
+      if(result.needsOpening)session.identityNotice=result.reason;
+      await save();if(current(state).session.id===session.id)render();
+      if(segment.phase!=='opening' && !session.ending){
+        // Identity arrival must invalidate an in-flight analysis of unknown turns.
+        if(current(state).session.id===session.id)cancelRequest();
+        for(let i=0;busy && i<600 && !closed;i++)await new Promise(r=>setTimeout(r,100));
+        if(!closed && !session.endedAt && !session.paused && current(state).session.id===session.id && !busy)await analyzeSegment(segment);
+      }
+    }catch(error){if(!session.endedAt && segment.revision===ticket.revision && segment.roleSource!=='manual'){segment.identityStatus='unknown';segment.identityReason=error.message;await save();if(current(state).session.id===session.id)render();}}
+  })();identityTasks.add(task);try{await task;}finally{identityTasks.delete(task);}
+}
+
 const inputDrafts=new Map();
 const openPanels=new Map(); let renderedPanelKey=null;
 document.addEventListener('input',event=>{const el=event.target;if(el.id==='transcript')draft=el.value;if(el.id==='host-question'||el.id==='outline-paste'||el.dataset?.summary)inputDrafts.set(state.sessionId+':'+(el.id||el.dataset.summary),el.value);});
@@ -135,7 +196,7 @@ function renderTopics() {
   return `<div class="lead"><div class="eyebrow">每次交流，都有一个想弄清的问题</div><h1>从一个好问题开始。</h1><p class="muted">选一个适合的模板，目标与提纲已经备好。</p></div><section class="template-section" aria-labelledby="template-title"><div class="section-head"><h2 id="template-title">开始新访谈</h2><span class="fine">提纲可自由修改</span></div><div class="interview-templates">${templates.map(([key, t]) => `<article class="interview-template"><div class="between"><h3>${esc(t.label)}</h3><span class="template-time">约 ${t.minutes} 分钟</span></div><p>${esc(t.description)}</p><div class="template-outline">${t.items.map(i => esc(i[1])).join('<span aria-hidden="true"> / </span>')}</div><button class="small secondary" data-action="new-topic" data-template="${key}" aria-label="使用${esc(t.label)}模板">使用模板 <span aria-hidden="true">↗</span></button></article>`).join('')}</div></section><section class="topic-history" aria-labelledby="history-title"><div class="section-head"><h2 id="history-title">我的访谈</h2><span class="fine">${state.topics.length} 个主题</span></div>${state.topics.map(t => `<article class="topic ${t.id === state.topicId ? 'selected' : ''}"><div class="between"><h2>${esc(t.title)}</h2><span class="pill">${esc(TEMPLATES[t.template]?.label || '自定义')}</span></div><p class="muted">${t.sessions.length} 次访谈 · ${t.sessions.reduce((n, s) => n + s.segments.length, 0)} 段对话</p><p class="fine">${esc(last(t.sessions).goal)}</p><div class="row topic-actions"><button class="secondary small" data-action="open-topic" data-id="${t.id}">打开记录</button><button class="small" data-action="resume-topic" data-id="${t.id}">新一次访谈</button><button class="small danger" data-action="delete-topic" data-id="${t.id}">删除</button></div>${deleteId === t.id ? `<div class="delete-confirm">确认删除这份本机记录？此操作不能撤销，建议先导出。<div class="row"><button class="small" data-action="cancel-delete">取消</button><button class="small" data-action="download-topic" data-id="${t.id}">先导出</button><button class="small danger" data-action="confirm-delete" data-id="${t.id}">确认删除</button></div></div>` : ''}</article>`).join('')}</section>`;
 }
 function renderPrepare(t, s) {
-  if (s.analysisVersion === 2) return hostPrepare(t, s, { progress: modelProgressMarkup(), error: preparationError, starting: prepareStarting, busy, service: serviceBar() });
+  if (s.analysisVersion === 2) {void prepareVoiceStatus();return hostPrepare(t, s, { progress: modelProgressMarkup(), error: preparationError, starting: prepareStarting, busy, service: serviceBar(), voiceStatus });}
   const locked = s.segments.length > 0;
   return `<div class="lead"><div class="eyebrow">先有目标，再有好问题</div><h1>这次想弄清什么？</h1><p class="muted">清单决定提醒的方向。你可以随时补充和修改。</p></div>${modelProgressMarkup()}<form id="prepare-form" novalidate><section class="card"><label>访谈主题<input name="title" value="${esc(t.title)}" required maxlength="100"></label><label>本次目标<textarea name="goal" required maxlength="1500" placeholder="例如：弄清用户上次在哪一步放弃报名，以及为什么。">${esc(s.goal)}</textarea></label><label>当前受访角色<input name="role" value="${esc(s.role)}" required maxlength="100" placeholder="例如：客服主管 / 体验用户"></label></section><section class="card"><div class="section-head"><h2>待确认清单</h2><span class="pill">由你确认</span></div><p class="fine">${locked ? '修改清单后，本次旧分析会撤回，原话保留，可重新分析。' : '模板只是候选草案。删改后，确认这些是本次真正想问的事。'}</p><div id="item-editors">${s.items.map((i, index) => `<div class="item-editor" data-item="${esc(i.id)}"><div class="row"><input aria-label="事项 ${index + 1} 名称" data-field="label" value="${esc(i.label)}" required maxlength="100"><button type="button" class="danger small" data-action="remove-item" data-id="${esc(i.id)}">移除</button></div><input aria-label="事项 ${index + 1} 问题" data-field="question" value="${esc(i.question)}" required maxlength="300"></div>`).join('')}</div><div class="row space-top"><button type="button" class="secondary small" data-action="add-item">＋ 添加事项</button><button type="button" class="small" data-action="generate-list" ${busy ? 'disabled' : ''}>根据目标生成候选</button></div></section><div class="notice">确认现场允许记录后开始。默认持续录音并发送至火山引擎，稳定分句自动保存和分析；可随时暂停或停止。</div><p id="preparation-error" class="notice error" role="alert" ${preparationError ? '' : 'hidden'}>${esc(preparationError)}</p><button type="submit" class="primary wide" ${prepareStarting || busy || s.endedAt ? 'disabled' : ''}>确认清单，${locked ? '继续' : '开始'}录音访谈 →</button></form>${s.endedAt ? '<p class="fine space-top">这次访谈已结束。请在主题页选择“新一次访谈”。</p>' : ''}${serviceBar()}`;
 }
@@ -167,7 +228,7 @@ function render() {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   if(renderedPanelKey)openPanels.set(renderedPanelKey,[...document.querySelectorAll('#main details[open]')].map(el=>el.querySelector('summary')?.textContent));
   renderedPanelKey=state.sessionId+':'+view;
-  $('main').innerHTML = (view === 'topics' ? renderTopics() : view === 'prepare' ? renderPrepare(topic, session) : view === 'results' ? renderResults(topic, session) : renderLive(topic, session)) + '<footer>问全·实时访谈助手 v0.5.5 · 留心听，问清楚。</footer>';
+  $('main').innerHTML = (view === 'topics' ? renderTopics() : view === 'prepare' ? renderPrepare(topic, session) : view === 'results' ? renderResults(topic, session) : renderLive(topic, session)) + '<footer>问全·实时访谈助手 v0.6.0 · 留心听，问清楚。</footer>';
   for(const el of document.querySelectorAll('#host-question,#outline-paste,[data-summary]')){const key=state.sessionId+':'+(el.id||el.dataset.summary);if(inputDrafts.has(key))el.value=inputDrafts.get(key);}
   for(const el of document.querySelectorAll('#main details'))if(openPanels.get(renderedPanelKey)?.includes(el.querySelector('summary')?.textContent))el.open=true;
   drawPreview(); updateModelProgress();
@@ -185,7 +246,7 @@ async function syncGlasses() {
   drawPreview();
   if (!ready || !runtimeActive) { delivery = '手机预览可用；尚未连接显示接口'; return; }
   const { session } = current(state);
-  await presenter.present(localCanvas, session.paused || !!session.endedAt || !session.confirmed, {sessionId:session.id,questionId:activeQuestion(session)?.id || null,stableAt:activeQuestion(session)?.source === 'outline' ? null : session.lastAnalysis?.stableAt || null,analysisAt:session.lastAnalysis?.completedAt || null});
+  await presenter.present(localCanvas, session.paused || !!session.endedAt || session.phase==='opening' || !session.confirmed, {sessionId:session.id,questionId:activeQuestion(session)?.id || null,stableAt:activeQuestion(session)?.source === 'outline' ? null : session.lastAnalysis?.stableAt || null,identityReadyAt:session.lastAnalysis?.identityReadyAt || null,analysisAt:session.lastAnalysis?.completedAt || null});
 }
 async function api(path, data, { binary = false, signal, backend = state.settings.backend, token = gatewayToken(backend), onProgress } = {}) {
   backend = normalizeBackend(backend, mobileHost);
@@ -212,6 +273,7 @@ async function api(path, data, { binary = false, signal, backend = state.setting
   } finally { deadline.dispose(); }
 }
 async function resolveRoles(topic, session, signal) {
+  if(session.identityMode==='voice')return [];
   const ctx = roleContext(session);
   if (!ctx.segments.some(x => x.role === 'unknown' && x.roleSource !== 'manual')) return [];
   const revision = session.revision;
@@ -231,6 +293,9 @@ function analyzeSegment(segment, batch = [segment]) {
 async function analyzeSegmentImpl(segment, batch) {
   if (busy) return;
   const { topic, session } = current(state);
+  batch=batch.filter(x=>x.phase!=='opening');
+  if(!batch.length || session.phase==='opening')return;
+  segment=batch[batch.length-1];
   if (session.paused) return;
   if (!session.confirmed || session.endedAt) throw new Error('请先确认访谈主线。');
   session.analysisError=''; busy = true; const controller = new AbortController(); request = controller; render();
@@ -265,7 +330,7 @@ async function analyzeSegmentImpl(segment, batch) {
         for(const q of availableQuestions(session))q.status='superseded';
         session.displayedQuestionId=null;
       }
-      session.lastAnalysis={stableAt:target.asr?.receivedAt || null,completedAt:Date.now(),batchSize:turns.length};
+      session.lastAnalysis={identityReadyAt:target.identityReadyAt || null,stableAt:target.asr?.receivedAt || null,completedAt:Date.now(),batchSize:turns.length};
     }
     refreshInterviewSuggestion(session);
     await save(); render(); void syncGlasses();
@@ -299,6 +364,7 @@ function capturePreparation() {
   const { topic, session } = current(state), data = { get: name => form.elements[name].value };
   const goal = String(data.get('goal')).trim(), role = String(data.get('role')).trim();
   const items = [...document.querySelectorAll('.item-editor')].map((div) => ({ id: div.dataset.item, label: div.querySelector('[data-field=label]').value.trim(), question: div.querySelector('[data-field=question]').value.trim(), ...(session.analysisVersion === 2 ? { preparedQuestions: div.querySelector('[data-field=preparedQuestions]')?.value.trim() || '' } : {}), priority: session.analysisVersion === 2 ? Number(div.querySelector('[data-field=priority]')?.value || 1) : session.items.find(i => i.id === div.dataset.item)?.priority || 1 }));
+  if(session.analysisVersion===2 && form.elements.expectedGuests)configurePeople(session,Number(form.elements.expectedGuests.value),form.elements.identityMode.value);
   const hostFields = session.analysisVersion === 2 ? Object.fromEntries(['guestBackground','backgroundSource','boundaries'].map(k=>[k, String(form.elements[k]?.value || '').trim()])) : {};
   const changed = Object.entries(hostFields).some(([k,v])=>session[k]!==v) || JSON.stringify(session.items) !== JSON.stringify(items) || session.goal !== goal;
   if(session.analysisVersion===2)session.plannedMinutes=Math.max(0,Math.min(240,Number(form.elements.plannedMinutes?.value)||0));
@@ -318,6 +384,7 @@ function updateStreamingPreview() {
 function attachSpeechRole(session, segment, item) {
   if (session.analysisVersion !== 2) return;
   segment.speakerKey = item.speakerKey || null;
+  if(session.identityMode==='voice'){segment.role='unknown';segment.roleSource='voice';if(voiceRings.has(segment.asr?.streamId))void resolveVoice(session,segment);else{segment.identityStatus='unknown';segment.identityReason='音频缓存已释放，请补充连续讲话或人工更正。';}return;}
   segment.role = item.speakerKey ? (session.speakerBindings?.[item.speakerKey] || 'unknown') : 'unknown';
   if(segment.role!=='unknown')segment.roleSource=session.speakerBindingSources?.[item.speakerKey] || 'manual';
 }
@@ -354,7 +421,7 @@ async function pumpSpeech() {
         segment.asr={service:'volcengine',key:item.key,streamId:item.streamId,startMs:item.startMs,endMs:item.endMs,timingUnavailable:!!item.timingUnavailable,receivedAt:item.receivedAt,speakerId:item.speakerId??null,reviewed:false};
         attachSpeechRole(session,segment,item); batch.push(segment); size+=item.text.length;
       } while(speechQueue.length && batch.length<(session.analysisVersion===2?16:1));
-      await save(); if(batch.length)await analyzeSegment(batch[batch.length-1],batch);
+      await save(); if(batch.length)render(); if(batch.length)await analyzeSegment(batch[batch.length-1],batch);
     }
   })();
   try { await speechPump; } finally { speechPump = null; scheduleSpeech(); updateStreamingPreview(); }
@@ -364,12 +431,14 @@ async function beginRecording(blob = null) {
   if (streamStatus !== 'idle' || recording || !session.confirmed || session.endedAt || session.paused) return;
   if (!ready && !blob) { streamError = '未连接 App 录音接口，请在 MemoMind App 中打开问全。'; render(); return; }
   const epoch = ++streamEpoch, sessionId = session.id, streamId = uid();
+  if(session.identityMode==='voice')voiceRings.set(streamId,new VoiceAudio());
   streamStatus = 'starting'; streamError = ''; streamPartial = ''; capturedMs = 0; streamSource = blob ? 'file' : 'native'; streamDraining = false;
   startupController = new AbortController();
   state.settings.mode = 'model'; streamNotice = '正在保存访谈并检查录音能力…'; render();
   const valid = () => !closed && epoch === streamEpoch && current(state).session.id === sessionId && runtimeActive;
   const callbacks = {
     token: gatewayToken(),
+    onAudioFrame: frame=>{if(valid() && session.identityMode==='voice')voiceRings.get(streamId)?.push(frame);},
     signal: startupController.signal,
     isCancelled: () => !valid(),
     onStage: message => { if (valid()) { streamNotice = message; for (const id of ['stream-notice', 'recording-progress']) if ($(id)) $(id).textContent = message; } },
@@ -390,10 +459,11 @@ async function beginRecording(blob = null) {
       if (queued) { Object.assign(queued, item, { key, speakerKey: item.speakerId == null ? null : `${streamId}:${item.speakerId}` }); const pending = session.pendingAsr?.find(x => x.key === key); if (pending) Object.assign(pending, queued); void save(); return; }
       const segment = session.segments.find(x => x.asr?.key === key);
       const speakerKey = item.speakerId == null ? null : `${streamId}:${item.speakerId}`;
-      if (segment && (segment.text !== item.text || (session.analysisVersion === 2 && segment.speakerKey !== speakerKey))) { cancelRequest(); correctSegment(session, segment.id, item.text, session.analysisVersion === 2 ? (session.speakerBindings[speakerKey] || 'unknown') : segment.role, segment.roleSource || 'auto'); if (session.analysisVersion === 2) segment.speakerKey = speakerKey; void save(); streamError = '识别服务修订了稳定分句，已撤回相关旧分析，请核对并重新分析。'; render(); void syncGlasses(); }
+      if(segment?.roleSource==='manual')return;
+      if (segment && (segment.text !== item.text || (session.analysisVersion === 2 && segment.speakerKey !== speakerKey))) { cancelRequest(); correctSegment(session, segment.id, item.text, session.analysisVersion === 2 ? (session.speakerBindings[speakerKey] || 'unknown') : segment.role, segment.roleSource || 'auto'); if (session.analysisVersion === 2) segment.speakerKey = speakerKey; if(session.identityMode==='voice'){segment.participantId=null;segment.role='unknown';Object.assign(segment.asr,{startMs:item.startMs,endMs:item.endMs});void resolveVoice(session,segment);} void save(); streamError = '识别服务修订了稳定分句，已撤回相关旧分析，请核对并重新分析。'; render(); void syncGlasses(); }
     },
     onError: error => { if (!valid()) return; streamError = error.message; streamNotice = '录音未完成，请按下方错误提示处理后重试。'; notify(error.message, 'error'); void stopRecording(true); },
-    onStopped: () => { if (!valid() || streamDraining) return; recording = null; streamStatus = 'idle'; streamPartial = ''; streamNotice = '录音已停止，已保留稳定分句。'; scheduleSpeech(); if (!busy && refreshInterviewSuggestion(session)) void save(); render(); void syncGlasses(); }
+    onStopped: () => { if (!valid() || streamDraining) return; setTimeout(()=>{voiceRings.get(streamId)?.clear();voiceRings.delete(streamId);},60000); recording = null; streamStatus = 'idle'; streamPartial = ''; streamNotice = '录音已停止，已保留稳定分句。'; scheduleSpeech(); if (!busy && refreshInterviewSuggestion(session)) void save(); render(); void syncGlasses(); }
   };
   try {
     await save({ strict: true });
@@ -407,13 +477,14 @@ async function beginRecording(blob = null) {
     callbacks.onStage('正在检测云端转写服务…');
     const health = await api('/api/health', undefined, { signal: startupController.signal });
     if(session.analysisVersion===2 && !health.features?.batchAnalysis)throw new Error('当前网关尚未升级到0.5.0，未开始录音。请先更新网关再使用本版本。');
+    if(session.identityMode==='voice'){const v=await refreshVoiceStatus();if(!v.ready || !v.host?.registered)throw new Error(v.reason || '请先设置主持人声音。');}
     if (!health.asr?.streaming) throw new Error('后端尚未配置火山流式语音，请先检测服务连接。');
     if (!valid()) return;
     const opened = await (blob ? startFileReplay(blob, state.settings.backend, callbacks) : startNativeRecording(bridge.gm, state.settings.backend, callbacks));
     if (!valid()) { await opened.stop(true); return; }
     recording = opened; streamStatus = 'recording'; render();
     notify(blob ? '正在按实时速度回放文件，不使用麦克风。' : '正在持续录音并实时转写，点击停止即可收尾。');
-  } catch (error) { if (valid()) { streamError = error.message || '录音启动失败，请重试。'; streamNotice = '录音未启动，请检查下方提示。'; notify(streamError, 'error'); } }
+  } catch (error) { if (valid()) { voiceRings.get(streamId)?.clear();voiceRings.delete(streamId);streamError = error.message || '录音启动失败，请重试。'; streamNotice = '录音未启动，请检查下方提示。'; notify(streamError, 'error'); } }
   finally { if (valid() && streamStatus === 'starting') { streamStatus = 'idle'; render(); } }
 }
 async function stopRecording(discard = false) {
@@ -430,7 +501,7 @@ async function stopRecording(discard = false) {
     added = flushSpeechQueue();
   } catch (error) { streamError = error.message; }
   finally {
-    streamEpoch++; recording = null; streamStatus = 'idle'; streamPartial = ''; streamDraining = false; streamNotice = '录音已停止，已保留稳定分句。'; render(); resolveStop(); stopPromise = null;
+    streamEpoch++; const rings=[...voiceRings.keys()];for(const id of rings){voiceRings.get(id)?.clear();voiceRings.delete(id);} recording = null; streamStatus = 'idle'; streamPartial = ''; streamDraining = false; streamNotice = '录音已停止，已保留稳定分句。'; render(); resolveStop(); stopPromise = null;
   }
   // 手动停止后仍分析已收到的稳定分句；暂停/结束时保留为待分析，不重新启动录音。
   if (!discard) {
@@ -457,6 +528,26 @@ document.addEventListener('click', async event => {
     if (!action) return;
     snapshotDraft();
     const { topic, session } = current(state), id = button.dataset.id;
+    if(action==='voice-settings'){
+      if($('prepare-form'))capturePreparation();cancelRequest();await stopRecording(true);$('settings').close();
+      voiceMessage='';voiceStage='idle';$('voice-settings').showModal();renderVoice();
+      try{await refreshVoiceStatus();}catch(e){voiceStatus=null;voiceMessage=e.message;}renderVoice();return;
+    }
+    if(action==='voice-refresh'){voiceMessage='';try{await refreshVoiceStatus();}catch(e){voiceMessage=e.message;}renderVoice();return;}
+    if(action==='voice-cancel' || action==='voice-close'){voiceController?.abort();if(action==='voice-close')$('voice-settings').close();else{voiceMessage='已取消录入，原有档案保留。';renderVoice();}return;}
+    if(action==='voice-delete'){await api('/api/voice/delete-host',{});voiceMessage='声音已删除；正在进行的本场临时特征已清理。';await refreshVoiceStatus();renderVoice();return;}
+    if(action==='voice-enroll'){
+      if(!$('voice-consent').checked){voiceMessage='请先阅读并同意声音采集说明。';renderVoice();return;}
+      if(!ready){voiceMessage='请在 MemoMind App 中连接眼镜后录入主持人声音。当前浏览器只能预览界面。';renderVoice();return;}
+      voiceController=new AbortController();voiceStage='capturing';voiceMessage='请单独连续讲话，约 10 秒后自动完成。';renderVoice();
+      try{const sample=await captureHostVoice(bridge.gm,voiceController.signal,ms=>{if($('voice-recording-seconds'))$('voice-recording-seconds').textContent=String(Math.floor(ms/1000));if($('voice-recording-progress'))$('voice-recording-progress').value=ms;});voiceStage='processing';voiceMessage='正在检查声音质量并保存…';renderVoice();await api('/api/voice/enroll',{consent:true,sample},{signal:voiceController.signal});voiceMessage='保存成功。';}
+      catch(e){voiceMessage=voiceController.signal.aborted?'已取消录入。若保存请求已经到达服务，请刷新核对最终状态。':e.message;}
+      finally{voiceStage='idle';voiceController=null;try{await refreshVoiceStatus();}catch{}renderVoice();}return;
+    }
+    if(action==='opening-count'){configurePeople(session,Number($('opening-count').value),'voice');await save();render();return;}
+    if(action==='start-formal'||action==='start-formal-incomplete'){startFormal(session,action==='start-formal-incomplete');refreshInterviewSuggestion(session);await save();render();void syncGlasses();return;}
+    if(action==='reopen-introductions'){if(session.endedAt||session.paused)throw new Error('当前不能补充介绍。');cancelRequest();session.phase='opening';session.revision++;await save();render();void syncGlasses();return;}
+    if(action==='manual-guest'||action==='manual-host'){addManualPerson(session,action==='manual-host'?'host':'guest');await save();render();return;}
     if (action === 'retry-save') { await save({ strict: true }); notify('访谈记录已保存。'); return; }
     if (action === 'backup-current') return download(topic);
     if (action === 'generate-report') return await generateReport();
@@ -541,7 +632,7 @@ document.addEventListener('click', async event => {
       const seg = addSegment(session, draft, draftSource); if (session.analysisVersion === 2) { seg.role=draftRole; if(draftRole!=='unknown')seg.roleSource='manual'; } draft = ''; draftSource = 'manual'; await save();
       await analyzeSegment(seg); return;
     }
-    if (action === 'retry') return await analyzeSegment(session.segments.find(seg => seg.id === id));
+    if(action==='retry'){const seg=session.segments.find(seg=>seg.id===id);if(session.identityMode==='voice' && !seg.participantId && seg.asr){await resolveVoice(session,seg);return;}return await analyzeSegment(seg);}
     if (['asked', 'skipped', 'deferred'].includes(action)) { cancelRequest(); if (session.analysisVersion === 2) questionFeedback(session, id || activeQuestion(session)?.id, action); else feedback(session, action); refreshInterviewSuggestion(session); await save(); render(); await syncGlasses(); notify(action === 'asked' ? '已标记为提出，缺口仍等待回答。' : action === 'skipped' ? '已跳过这条提示。' : '已放入稍后处理，可在记录中查看。'); return; }
     if (action === 'pause') {
       if (!session.paused) resumeCaptureSessionId = (recording || streamStatus === 'starting') ? session.id : null;
@@ -553,7 +644,7 @@ document.addEventListener('click', async event => {
       return;
     }
     if (action === 'resend') return await syncGlasses();
-    if (action === 'end') { if(session.ending)return;session.ending=true;render();try{cancelRequest();if(ongoingAnalysis)await ongoingAnalysis;await stopRecording(false);session.endedAt=now();session.revision++;delete session.ending;await save();view='results';render();void syncGlasses();if(session.analysisVersion===2)await generateReport();}finally{delete session.ending;render();}return; }
+    if (action === 'end') { if(session.ending)return;session.ending=true;render();try{cancelRequest();if(ongoingAnalysis)await ongoingAnalysis;await stopRecording(false);if(identityTasks.size){streamNotice='正在等待人物识别收尾，原话已保留…';render();let identityTimer;await Promise.race([Promise.allSettled([...identityTasks]),new Promise(resolve=>{identityTimer=setTimeout(resolve,30000);})]);clearTimeout(identityTimer);}session.endedAt=now();session.revision++;if(session.identityMode==='voice'){try{await api('/api/voice/end',{sessionId:session.id});session.voiceCleanup='已清理临时声音特征';}catch{session.voiceCleanup='清理请求未成功，临时特征最后活动后两小时自动删除';}}delete session.ending;await save();view='results';render();void syncGlasses();if(session.analysisVersion===2)await generateReport();}finally{delete session.ending;render();}return; }
     if (action === 'edit-segment') { if (recording || streamStatus === 'starting') { cancelRequest(); await stopRecording(); } editing = id; render(); return; }
     if (action === 'cancel-edit') { editing = null; render(); return; }
     if (action === 'save-correction') {
@@ -592,6 +683,7 @@ async function confirmAndRecord({ record = true } = {}) {
     if (!session.goal || !session.role || !session.items.length || session.items.some(i => !i.label || !i.question)) throw new Error('请填好目标、角色，并至少确认一条完整事项；新增的空白事项请填写或移除。');
     if (session.endedAt) throw new Error('这次访谈已结束，请新建一次访谈。');
     if(!session.segments.length)session.startedAt=now();
+    if(session.identityMode==='voice'){const status=await refreshVoiceStatus();if(!status.ready || !status.host?.registered)throw new Error(status.reason || '请先录入主持人声音，或明确选择原模式。');}
     session.confirmed = true; session.paused = false;
     refreshInterviewSuggestion(session);
     // 先显示启动状态；存储和眼镜传输不再让准备页看起来毫无反应。
@@ -606,6 +698,9 @@ async function confirmAndRecord({ record = true } = {}) {
   } finally { prepareStarting = false; if (view === 'prepare') render(); }
 }
 document.addEventListener('change', async event => {
+  if(event.target.id==='voice-consent'){const button=document.querySelector('#voice-settings [data-action=voice-enroll]');if(button)button.disabled=!event.target.checked || !voiceStatus?.ready || ['capturing','processing'].includes(voiceStage);return;}
+  if(event.target.dataset?.personSegment){try{cancelRequest();const {session}=current(state);correctPerson(session,session.segments.find(x=>x.id===event.target.dataset.personSegment),event.target.value);await save();render();void syncGlasses();}catch(e){notify(e.message,'error');}return;}
+  if(event.target.dataset?.personAlias){const {session}=current(state),p=session.participants?.find(x=>x.id===event.target.dataset.personAlias);if(p){p.alias=event.target.value.trim().slice(0,60);session.revision++;await save();render();}return;}
   if (!event.target.dataset?.speaker) return;
   try { cancelRequest(); const {session}=current(state); bindSpeaker(session,event.target.dataset.speaker,event.target.value); await save(); render(); void syncGlasses(); notify('角色已绑定，旧分析已撤回；请重新分析稳定转写。'); }
   catch(error) { notify(error.message,'error'); render(); }
@@ -627,9 +722,10 @@ $('settings-form').onsubmit = async event => {
     if (token && (token.length < 32 || token.length > 256)) throw new Error('设备访问码长度应为 32–256 个字符。');
     // 访问码单独存入插件 WebView 本地存储，不经过会打印参数的 Bridge，也不进入访谈导出。
     localStorage.setItem(ACCESS_KEY, JSON.stringify({ backend, token }));
-    state.settings = { ...state.settings, mode: form.elements.mode.value, backend, backendExplicit: true }; cancelRequest(); await save(); $('settings').close(); render(); notify('分析设置已保存。');
+    voiceStatus=null;voiceStatusCheckedAt=0;gatewayHealth=null;state.settings = { ...state.settings, mode: form.elements.mode.value, backend, backendExplicit: true }; cancelRequest(); await save(); $('settings').close(); render(); notify('分析设置已保存。');
   } catch (error) { notify(error.message, 'error'); }
 };
+$('voice-settings').addEventListener('cancel',()=>voiceController?.abort());
 $('close-settings').onclick = () => $('settings').close();
 $('import-connection').onclick = () => {
   try {
@@ -654,10 +750,10 @@ $('audio-file-input').onchange = async event => {
   render();
 };
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && !pickingAudio) { cancelRequest(); void stopRecording(true); }
+  if (document.hidden && !pickingAudio) { voiceController?.abort(); cancelRequest(); void stopRecording(true); }
 });
 window.addEventListener('pagehide', () => {
-  closed = true; lifetime.abort(); cancelRequest(); void stopRecording(true); clearTimeout(toastTimer);
+  closed = true; voiceController?.abort(); for(const ring of voiceRings.values())ring.clear();voiceRings.clear(); lifetime.abort(); cancelRequest(); void stopRecording(true); clearTimeout(toastTimer);
   // Host 在卸载时已经撤销旧运行代际；此时不能再向旧会话发送 Bridge 请求。
   presenter?.close(); bridge?.close();
 });
@@ -671,7 +767,7 @@ async function initialize() {
       }
       if (type === 'lifecycle') {
         runtimeActive = data.state === 'running';
-        if (!runtimeActive && !pickingAudio) { cancelRequest(); void stopRecording(true); if (ready) void presenter.present(localCanvas, true); }
+        if (!runtimeActive && !pickingAudio) { voiceController?.abort(); cancelRequest(); void stopRecording(true); if (ready) void presenter.present(localCanvas, true); }
         else void syncGlasses();
       }
     });
@@ -684,7 +780,7 @@ async function initialize() {
       if(!session || receipt.clear || !meta.questionId || !meta.stableAt)return;
       session.deliveryMetrics ||= [];
       if(session.deliveryMetrics.some(x=>x.questionId===meta.questionId))return;
-      session.deliveryMetrics.push({questionId:meta.questionId,stableAt:meta.stableAt,analysisAt:meta.analysisAt,confirmedAt:receipt.confirmedAt,stableToDisplayMs:receipt.confirmedAt-meta.stableAt});
+      session.deliveryMetrics.push({questionId:meta.questionId,stableAt:meta.stableAt,identityReadyAt:meta.identityReadyAt,identityToDisplayMs:meta.identityReadyAt?receipt.confirmedAt-meta.identityReadyAt:null,analysisAt:meta.analysisAt,confirmedAt:receipt.confirmedAt,stableToDisplayMs:receipt.confirmedAt-meta.stableAt});
       session.deliveryMetrics=session.deliveryMetrics.slice(-200);void save();
     });
     try { const saved = await recordStore().load(); if (saved) state = safeState(saved); storageLoaded = true; }

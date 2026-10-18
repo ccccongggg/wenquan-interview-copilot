@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import * as core from '../web/core.js';
+import * as participants from '../web/participants.js';
 import {hostPrepare} from '../web/interview-ui.js';
 import {availableQuestions, ensureInterviewSuggestion, interviewDisplay} from '../web/interview.js';
 import { DEMOS } from '../web/fixtures.js';
@@ -36,7 +37,7 @@ function appHarness({ emptyItem = false, storageFailure = false } = {}) {
     storage: { async get() { return { value: null }; }, async set() { if (storageFailure) throw new Error('PERMISSION_DENIED'); } }
   };
   const context = vm.createContext({
-    ...core, ensureInterviewSuggestion, interviewDisplay, DEMOS, last, requestDeadline, runInForeground, createInterviewStore, document, window: { scrollTo() {}, addEventListener() {} },
+    ...core, ...participants, ensureInterviewSuggestion, interviewDisplay, DEMOS, last, requestDeadline, runInForeground, createInterviewStore, document, window: { scrollTo() {}, addEventListener() {} },
     AbortController, location: { origin: 'https://mobile.test' }, localStorage: { getItem() { return null; } },
     DEFAULT_GATEWAY: state.settings.backend, DEFAULT_GATEWAY_TOKEN: 'test-only-device-code-32-characters',
     accessForGateway: () => 'test-only-device-code-32-characters', normalizeBackend: x => x, endpoint: (base, path) => base + path,
@@ -49,7 +50,7 @@ function appHarness({ emptyItem = false, storageFailure = false } = {}) {
 }
 async function loadApp(options) {
   const harness = appHarness(options);
-  const source = (await readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '').replace('void initialize();', '');
+  const source = (await readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('void initialize();', '');
   vm.runInContext(source + `\nstate = fixtureState; bridge = { gm: fixtureGm }; ready = storageLoaded = true; presenter = { present: () => new Promise(() => {}) };`, harness.context);
   return harness;
 }
@@ -97,7 +98,7 @@ test('应用实际保存入口在手机 64 KB 限制下保存长转写并可重�
   assert.equal(JSON.stringify(restored), expected);
 });
 test('旧 WebView 缺少 structuredClone、findLast、at 和 Object.hasOwn 时仍可保存与显示追问', async () => {
-  const source = (await readFile(new URL('../web/core.js', import.meta.url), 'utf8')).replace(/^import .*;\n/gm, '').replace(/^export /gm, '');
+  const source = (await readFile(new URL('../web/core.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
   const context = vm.createContext({ last, hasOwn: (o, k) => Object.prototype.hasOwnProperty.call(o, k), crypto: { getRandomValues: buffer => buffer.fill(7) }, Uint8Array });
   vm.runInContext('Array.prototype.findLast = undefined; Array.prototype.at = undefined; Object.hasOwn = undefined;', context);
   const result = vm.runInContext(source + `\nconst state = newState('fde'); const copy = clone(state); const session = current(copy).session; session.questions.push({status:'suggested', text:'仍可显示'}); ({id: session.id, question: activeQuestion(session).text, copied: copy !== state});`, context);

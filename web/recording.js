@@ -64,11 +64,14 @@ export async function startNativeRecording(gm, backend, callbacks) {
     }, callbacks.firstFrameTimeoutMs || 8000);
     const consuming = (async () => {
       try {
-        let received = false;
+        let received = false, audioMs = 0;
         while (!cancelled) {
           const { value, done } = await reader.read(); if (done) break;
           if (!received) { received = true; clearTimeout(firstFrameTimer); callbacks.onStage?.('正在接收眼镜音频并实时转写。'); }
-          client.send(ogg.push(value)); callbacks.onChunk?.(value.durationMs);
+          client.send(ogg.push(value));
+          let offset=0;
+          for(const length of value.frameLengths) {const data=value.data.slice(offset,offset+length);offset+=length;callbacks.onAudioFrame?.({format:'ogg',startMs:audioMs,endMs:audioMs+20,chunk:{data,frameLengths:[length]}});audioMs+=20;}
+          callbacks.onChunk?.(value.durationMs);
         }
         if (!cancelled) { client.send(ogg.end()); await client.finish(); }
       } catch (error) { if (!cancelled) { cleanup(); callbacks.onError?.(error); } }
@@ -93,6 +96,7 @@ export async function startFileReplay(blob, backend, callbacks) {
       for (let i = 0; i < samples.length && !stop && !cancelled; i += 3200) {
         const end = Math.min(i + 3200, samples.length), bytes = new Uint8Array((end - i) * 2), view = new DataView(bytes.buffer);
         for (let j = i; j < end; j++) view.setInt16((j - i) * 2, Math.round(Math.max(-1, Math.min(1, samples[j])) * 32767), true);
+        for(let offset=i;offset<end;offset+=320){const until=Math.min(offset+320,end);callbacks.onAudioFrame?.({format:'pcm',startMs:offset/16,endMs:until/16,bytes:bytes.slice((offset-i)*2,(until-i)*2)});}
         client.send(bytes); callbacks.onChunk?.((end - i) / 16); await wait(200);
       }
       if (!cancelled) await client.finish();

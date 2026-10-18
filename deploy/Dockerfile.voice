@@ -1,0 +1,16 @@
+# Optional local CPU voice backend. Model weights are mounted read-only and
+# credentials/encryption keys remain in a private runtime env file.
+FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ffmpeg && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY profiles/local-voice-requirements.txt /tmp/voice-requirements.txt
+RUN python3 -m venv /opt/voice-runtime && /opt/voice-runtime/bin/pip install --no-cache-dir -r /tmp/voice-requirements.txt
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+COPY server ./server
+COPY web/core.js web/interview.js web/intelligence.js web/audio-file.js web/platform.js web/participants.js web/participant-background.js ./web/
+RUN mkdir -p /var/lib/wenquan/voice-profiles && chown node:node /var/lib/wenquan/voice-profiles
+ENV VOICE_PROVIDER=local VOICE_PYTHON=/opt/voice-runtime/bin/python VOICE_LOCAL_MODEL=/models/speaker.onnx VOICE_STORE_DIR=/var/lib/wenquan/voice-profiles FFMPEG_PATH=/usr/bin/ffmpeg
+USER node
+EXPOSE 8787
+CMD ["node", "server/service.mjs"]

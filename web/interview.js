@@ -1,3 +1,4 @@
+import { segmentLabel } from './participants.js';
 // Versioned host-interview domain. Legacy checklist sessions stay on protocol v1.
 import { uid, now, clone } from './core.js';
 export const CHAPTER_STATUS = { untouched: '未展开', active: '正在展开', content: '已有内容', supplement: '待补充', closed: '主持人确认结束' };
@@ -10,7 +11,7 @@ export const normalizedQuestion = v => String(v).replace(/[\s，。？！、,.?!
 // Local suggestions work before the first audio turn and without a model call.
 // Displaying a suggestion never constitutes asking it or completing a chapter.
 export function ensureInterviewSuggestion(s) {
-  if (!isInterview(s) || !s.confirmed || s.paused || s.endedAt || availableQuestions(s).length || s.questions.some(q => q.status === 'asked' && q.itemId === s.currentChapterId) || s.pendingAsr?.length || s.segments.some(seg => seg.analyzedRevision !== seg.revision)) return null;
+  if (!isInterview(s) || s.phase === 'opening' || !s.confirmed || s.paused || s.endedAt || availableQuestions(s).length || s.questions.some(q => q.status === 'asked' && q.itemId === s.currentChapterId) || s.pendingAsr?.length || s.segments.some(seg => seg.phase!=='opening' && seg.analyzedRevision !== seg.revision)) return null;
   const start = Math.max(0, s.items.findIndex(i => i.id === s.currentChapterId));
   const ordered = [...s.items.slice(start), ...s.items.slice(0, start)];
   const consumed = item => s.questions.some(q => ['asked', 'answered', 'skipped', 'deferred'].includes(q.status) && (q.guideKind === 'main' && q.itemId === item.id || normalizedQuestion(q.text) === normalizedQuestion(item.question)));
@@ -26,7 +27,7 @@ export function ensureInterviewSuggestion(s) {
   return q;
 }
 export function interviewDisplay(s) {
-  if (!isInterview(s) || !s.confirmed || s.paused || s.endedAt) return { question: null };
+  if (!isInterview(s) || s.phase === 'opening' || !s.confirmed || s.paused || s.endedAt) return { question: null };
   const active = availableQuestions(s).find(q => q.id === s.displayedQuestionId);
   const waiting = !active && [...s.questions].reverse().find(q => q.status === 'asked' && q.itemId === s.currentChapterId);
   const question = active || waiting || null;
@@ -51,7 +52,7 @@ export function questionFeedback(s, id, status) {
   if (s.paused || s.endedAt || !['asked', 'skipped', 'deferred'].includes(status)) return;
   const q = availableQuestions(s).find(x => x.id === id);
   if (!q) return;
-  q.status = status; q.feedbackAt = now(); if (status === 'asked') { q.manuallyAsked = true; s.currentChapterId = q.itemId; } q.askedAfter = status === 'asked' ? s.segments.length : undefined;
+  q.status = status; q.feedbackAt = now(); if (status === 'asked') { q.manuallyAsked = true; if(s.identityMode==='voice')q.targetParticipantIds=(s.participants||[]).filter(p=>p.role==='guest').map(p=>p.id); s.currentChapterId = q.itemId; } q.askedAfter = status === 'asked' ? s.segments.length : undefined;
   if (s.displayedQuestionId === id) s.displayedQuestionId = null;
   const next = availableQuestions(s)[0];
   if (status === 'asked') {
@@ -64,7 +65,7 @@ export function addHostQuestion(s, value, itemId = s.currentChapterId, segmentId
   if (!text(value, 100) || !s.items.some(i => i.id === itemId) || s.endedAt || s.paused) throw new Error('请填写 1–100 字的问题并选择有效主线。');
   const same = s.questions.find(q => normalizedQuestion(q.text) === normalizedQuestion(value) && q.status === 'asked');
   if (same) return same;
-  const q = { id: uid(), itemId, text: value.trim(), status: 'asked', type: 'supplement', basisType: 'outline', gap: '主持人实际提出，等待嘉宾回应', source: segmentId ? 'model' : 'manual', segmentId, quote, createdAt: now(), askedAfter: s.segments.length, askedSegmentId: segmentId, autoAsked: !!segmentId, manuallyAsked: !segmentId };
+  const q = { ...(s.identityMode==='voice'?{targetParticipantIds:(s.participants||[]).filter(p=>p.role==='guest').map(p=>p.id)}:{}), id: uid(), itemId, text: value.trim(), status: 'asked', type: 'supplement', basisType: 'outline', gap: '主持人实际提出，等待嘉宾回应', source: segmentId ? 'model' : 'manual', segmentId, quote, createdAt: now(), askedAfter: s.segments.length, askedSegmentId: segmentId, autoAsked: !!segmentId, manuallyAsked: !segmentId };
   for (const old of availableQuestions(s)) old.status = 'superseded';
   s.displayedQuestionId = null; s.currentChapterId = itemId;
   s.questions.push(q); s.revision++; return q;
@@ -81,7 +82,7 @@ export function setChapter(s, id, close = false) {
 export function invalidateInterview(s) {
   s.events.push({ type: 'interview-invalidated', at: now(), questions: clone(s.questions), summaries: clone(s.chapterSummaries || {}) });
   s.questions = s.questions.filter(q => !(q.autoAsked && !q.manuallyAsked) && ['asked', 'answered', 'skipped', 'deferred'].includes(q.status));
-  for (const q of s.questions) { if (q.status === 'answered') q.status = 'asked'; delete q.response; }
+  for (const q of s.questions) { if (q.status === 'answered') q.status = 'asked'; delete q.response; delete q.responses; }
   delete s.interviewSummary; s.summaryStatus=''; s.summaryError=''; s.manualSummaryChapters={};
   s.chapterSummaries = {}; s.displayedQuestionId = null; s.newCandidates = false;
 }
@@ -102,19 +103,19 @@ export function interviewContext(topic, s, segment, batch = [segment]) {
   const memory = s.items.flatMap(i => s.claims.filter(c => c.itemId === i.id).filter((_, index, list) => index < 2 || index >= list.length - 4));
   const wanted = new Set([...batch.map(x=>x.id), ...memory.map(c => c.segmentId)]);
   const selected = [], included = new Set(); let budget = 40000;
-  const take = seg => { if (!seg || included.has(seg.id) || seg.text.length > budget) return; budget -= seg.text.length; selected.push({ id: seg.id, text: seg.text, role: seg.role, sessionId: s.id, speakerKey: seg.speakerKey || null, index: s.segments.indexOf(seg)+1 }); included.add(seg.id); };
+  const take = seg => { if (!seg || seg.phase === 'opening' || included.has(seg.id) || seg.text.length > budget) return; budget -= seg.text.length; selected.push({ id: seg.id, text: seg.text, role: seg.role, sessionId: s.id, speakerKey: seg.speakerKey || null, ...(seg.participantId?{participantId:seg.participantId}:{}), index: s.segments.indexOf(seg)+1 }); included.add(seg.id); };
   for (const seg of batch) take(seg);
   for (const seg of s.segments) if (wanted.has(seg.id)) take(seg);
   for (const seg of [...s.segments].reverse().slice(0, 80)) take(seg);
-  return { analysisVersion: 2, batchIds: batch.map(x=>x.id), revision: s.revision, segmentRevision: segment.revision, sessionId: s.id, segmentId: segment.id, topic: topic.title, goal: s.goal, role: segment.role, guestBackground: s.guestBackground || '', backgroundSource: s.backgroundSource || '', boundaries: s.boundaries || '', currentChapterId: s.currentChapterId, items: s.items, chapterStates: s.chapterStates || {}, plannedMinutes:s.plannedMinutes||0, elapsedMinutes:Math.max(0,(Date.now()-Date.parse(s.startedAt))/60000)||0, segments: selected, claims: memory.filter(c => included.has(c.segmentId)), questions: s.questions.slice(-100).map(q => ({ id: q.id, itemId: q.itemId, text: q.text, status: q.status, informationGoal: q.informationGoal, segmentId: q.segmentId, askedSegmentId: q.askedSegmentId, askedAfter: q.askedAfter, response: q.response })), segmentIndex: s.segments.indexOf(segment) + 1 };
+  return { ...(s.identityMode==='voice'?{identityMode:'voice',participants:s.participants,expectedGuests:s.expectedGuests}:{}), analysisVersion: 2, batchIds: batch.map(x=>x.id), revision: s.revision, segmentRevision: segment.revision, sessionId: s.id, segmentId: segment.id, topic: topic.title, goal: s.goal, role: segment.role, guestBackground: s.guestBackground || '', backgroundSource: s.backgroundSource || '', boundaries: s.boundaries || '', currentChapterId: s.currentChapterId, items: s.items, chapterStates: s.chapterStates || {}, plannedMinutes:s.plannedMinutes||0, elapsedMinutes:Math.max(0,(Date.now()-Date.parse(s.startedAt))/60000)||0, segments: selected, claims: memory.filter(c => included.has(c.segmentId)), questions: s.questions.slice(-100).map(q => ({ id: q.id, itemId: q.itemId, text: q.text, status: q.status, informationGoal: q.informationGoal, segmentId: q.segmentId, askedSegmentId: q.askedSegmentId, askedAfter: q.askedAfter, response: q.response, ...(q.targetParticipantIds?{targetParticipantIds:q.targetParticipantIds}:{}), responses:q.responses })), segmentIndex: s.segments.indexOf(segment) + 1 };
 }
 export function validateInterview(raw, ctx) {
   if (!raw || raw.analysisVersion !== 2 || !Array.isArray(raw.candidates) || raw.candidates.length > 3 || !Array.isArray(raw.claims) || raw.claims.length > 30 || !Array.isArray(raw.responses) || raw.responses.length > 30 || !Array.isArray(raw.hostQuestions) || raw.hostQuestions.length > 5) throw new Error('主持人分析 v2 结构无效。');
   const items = new Map(ctx.items.map(i => [i.id, i])), segments = new Map(ctx.segments.map(s => [s.id, s])), current = segments.get(ctx.segmentId);
   const cite = (v, role, currentOnly = false) => {
     const seg = segments.get(v.segmentId);
-    if (!seg || seg.role !== role || (currentOnly && !(ctx.batchIds || [ctx.segmentId]).includes(seg.id)) || !text(v.quote) || !seg.text.includes(v.quote)) throw new Error('原话依据或说话人归属无效。');
-    return { segmentId: seg.id, quote: v.quote };
+    if (!seg || seg.phase==='opening' || (ctx.identityMode==='voice' && !seg.participantId) || seg.role !== role || (currentOnly && !(ctx.batchIds || [ctx.segmentId]).includes(seg.id)) || !text(v.quote) || !seg.text.includes(v.quote)) throw new Error('原话依据或说话人归属无效。');
+    return { segmentId: seg.id, quote: v.quote, ...(seg.participantId?{participantId:seg.participantId}:{}) };
   };
   const chapter = v => { if (!items.has(v.itemId)) throw new Error('主线归属无效。'); return v.itemId; };
   const claims = raw.claims.map(c => {
@@ -138,7 +139,9 @@ export function validateInterview(raw, ctx) {
     const matchedHost=raw.hostQuestions.find(h=>h.questionId===r.questionId);
     if(matchedHost && (segments.get(r.segmentId)?.index || ctx.segmentIndex)<=(segments.get(matchedHost.segmentId)?.index || ctx.segmentIndex)) throw new Error('回应必须晚于本批次提问。');
     if (!q || q.status === 'asked' && ((segments.get(r.segmentId)?.index || ctx.segmentIndex) <= (q.askedAfter || 0) || q.askedSegmentId === r.segmentId)) throw new Error('回应关联问题或轮次无效。');
-    return { questionId: r.questionId, ...cite(r, 'guest', true) };
+    const evidence=cite(r,'guest',true);
+    if(q.targetParticipantIds?.length && !q.targetParticipantIds.includes(evidence.participantId))throw new Error('该嘉宾不是本题回应对象。');
+    return { questionId: r.questionId, ...evidence };
   });
   const hostQuestions = raw.hostQuestions.map(q => {
     if (!text(q.text, 100)) throw new Error('主持人问题无效。');
@@ -153,7 +156,7 @@ export function validateInterview(raw, ctx) {
     return {questionId:r.questionId,status:r.status,reason:r.reason};
   });
   if (reviews.length>3 || new Set(reviews.map(r=>r.questionId)).size!==reviews.length) throw new Error('提示核对重复或过多。');
-  const answered = new Set(responses.map(r=>r.questionId));
+  const answered = new Set(responses.filter(r=>!ctx.questions.find(q=>q.id===r.questionId)?.targetParticipantIds?.length).map(r=>r.questionId));
   const filtered = candidates.filter(q=>!ctx.questions.some(old=>answered.has(old.id) && (normalizedQuestion(old.text)===normalizedQuestion(q.text) || old.informationGoal && normalizedQuestion(old.informationGoal)===normalizedQuestion(q.informationGoal))));
   return { analysisVersion: 2, claims, candidates: filtered, responses, hostQuestions, reviews, actions: [] };
 }
@@ -166,10 +169,12 @@ export function applyInterview(s, segment, raw, ctx, source) {
   const newQuestions=new Map();
   for (const h of result.hostQuestions) {
     const q = s.questions.find(q => q.id === h.questionId);
-    if (q) { q.status = 'asked'; q.askedAfter = ctx.segments.find(x=>x.id===h.segmentId)?.index || ctx.segmentIndex; q.askedSegmentId = h.segmentId; q.feedbackAt = now(); q.autoAsked = true; s.currentChapterId = q.itemId; }
+    if (q) { if(ctx.identityMode==='voice' && !q.targetParticipantIds)q.targetParticipantIds=ctx.participants.filter(p=>p.role==='guest').map(p=>p.id); q.status = 'asked'; q.askedAfter = ctx.segments.find(x=>x.id===h.segmentId)?.index || ctx.segmentIndex; q.askedSegmentId = h.segmentId; q.feedbackAt = now(); q.autoAsked = true; s.currentChapterId = q.itemId; }
     else { const q = addHostQuestion(s, h.text, h.itemId, h.segmentId, h.quote); q.askedAfter = ctx.segments.find(x=>x.id===h.segmentId)?.index || ctx.segmentIndex; newQuestions.set(`host:${h.segmentId}`,q); }
   }
-  for (const r of result.responses) { const q = s.questions.find(q => q.id === r.questionId) || newQuestions.get(r.questionId); q.status = 'answered'; q.response = r; if (q.guideKind === 'main') s.currentChapterId = q.itemId; }
+  for (const r of result.responses) { const q = s.questions.find(q => q.id === r.questionId) || newQuestions.get(r.questionId); q.responses ||= []; q.responses=q.responses.filter(x=>x.participantId!==r.participantId);q.responses.push(r); q.response = r;
+    const targets=q.targetParticipantIds || [];
+    q.status = targets.length && !targets.every(id=>q.responses.some(x=>x.participantId===id)) ? 'asked' : 'answered'; if (q.guideKind === 'main') s.currentChapterId = q.itemId; }
   for (const r of result.reviews) { const q=s.questions.find(q=>q.id===r.questionId); if (q && ['candidate','displayed'].includes(q.status)) { if(r.status==='superseded')q.status='superseded'; q.reviewReason=r.reason; q.reviewedAt=now(); } }
   for(const q of availableQuestions(s)) if(q.source !== 'outline' && Date.now()-Date.parse(q.reviewedAt || q.createdAt)>60000) { q.status='superseded';q.reviewReason='提示超过60秒未重新确认，已收起。'; }
   const retained = availableQuestions(s).find(q => q.id === s.displayedQuestionId && !(q.source === 'outline' && result.candidates.length));
@@ -187,16 +192,16 @@ export function interviewMarkdown(topic, s) {
   const lines = ['### 按主线回看', '', `嘉宾背景：${s.guestBackground || '未填写'}`, `资料来源：${s.backgroundSource || '未注明，需核对'}`, `重点与边界：${s.boundaries || '未填写'}`, ''];
   if(s.interviewSummary) {
     lines.push('### 整场访谈归纳（AI 草案）','');
-    for(const point of s.interviewSummary.overview)lines.push(`- ${point.text}`,...point.sources.map(ref=>`  > ${ref.quote}（${ref.segmentId}）`));
+    for(const point of s.interviewSummary.overview)lines.push(`- ${point.text}`,...point.sources.map(ref=>`  > ${ref.quote}（${segmentLabel(s,s.segments.find(x=>x.id===ref.segmentId)||{})} · ${ref.segmentId}）`));
     lines.push('','### 待补问与核对','');
     for(const q of s.interviewSummary.followUps)lines.push(`- ${s.items.find(i=>i.id===q.itemId)?.label || ''}：${q.text}`);
     lines.push('');
   }
   for (const item of s.items) {
     lines.push(`#### ${item.label} · ${CHAPTER_STATUS[chapterStatus(s, item.id)]}`, '', `内容目标：${item.question}`, `预设问题：${item.preparedQuestions || '未填写'}`, '', `主持人摘要（可编辑，需核对）：${s.chapterSummaries?.[item.id] || '未整理'}`, '');
-    for(const point of s.interviewSummary?.chapters.find(c=>c.itemId===item.id)?.points||[])lines.push(`- AI 归纳原稿：${point.text}`,...point.sources.map(ref=>`  > ${ref.quote}（${ref.segmentId}）`));
-    for (const c of s.claims.filter(c => c.itemId === item.id)) lines.push(`- 嘉宾自述：${c.text}`, `  > ${c.quote}`, `  来源片段：${c.segmentId}`);
-    for (const q of s.questions.filter(q => q.itemId === item.id)) lines.push(`- [${QUESTION_STATUS[q.status] || q.status}] ${q.text}`, `  依据：${q.basisType === 'outline' ? '主持人提纲 / 实际提问' : `${q.quote}（${q.segmentId}）`}`, ...(q.response ? [`  回应：${q.response.quote}（${q.response.segmentId}）`] : []));
+    for(const point of s.interviewSummary?.chapters.find(c=>c.itemId===item.id)?.points||[])lines.push(`- AI 归纳原稿：${point.text}`,...point.sources.map(ref=>`  > ${ref.quote}（${segmentLabel(s,s.segments.find(x=>x.id===ref.segmentId)||{})} · ${ref.segmentId}）`));
+    for (const c of s.claims.filter(c => c.itemId === item.id)) lines.push(`- 嘉宾自述：${c.text}`, `  > ${c.quote}`, `  来源人物：${segmentLabel(s,s.segments.find(x=>x.id===c.segmentId)||{})} · 来源片段：${c.segmentId}`);
+    for (const q of s.questions.filter(q => q.itemId === item.id)) lines.push(`- [${QUESTION_STATUS[q.status] || q.status}] ${q.text}`, `  依据：${q.basisType === 'outline' ? '主持人提纲 / 实际提问' : `${q.quote}（${q.segmentId}）`}`, ...(q.responses || (q.response?[q.response]:[])).map(r=>`  回应：${segmentLabel(s,s.segments.find(x=>x.id===r.segmentId)||{})}：${r.quote}（${r.segmentId}）`));
     lines.push('');
   }
   return lines.join('\n');

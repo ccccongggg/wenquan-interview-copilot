@@ -1,3 +1,4 @@
+import { participantBackground } from './participant-background.mjs';
 import http from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +9,13 @@ import { inspectAudio, MAX_AUDIO_BYTES } from '../web/audio-file.js';
 import { upstreamFailure } from './upstream.mjs';
 import { attachAsrSocket } from './volc-stream.mjs';
 import { transcribeVolcFile } from './volc-file.mjs';
+import { createVoiceService } from './voice.mjs';
 import { gatewayAuthorizer } from './auth.mjs';
 
 const root = resolve(fileURLToPath(new URL('../dist/', import.meta.url)));
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json' };
 export function createService(env = process.env, fetchImpl = fetch) {
+  const voice = createVoiceService(env, fetchImpl);
   const model = { base: env.MODEL_BASE_URL || 'https://api.openai.com/v1', key: env.MODEL_API_KEY, model: env.MODEL_NAME, stream: env.MODEL_STREAM === 'true', repair: env.MODEL_REPAIR === 'true', thinking: env.MODEL_THINKING === 'disabled' ? 'disabled' : undefined };
   const asr = { base: env.ASR_BASE_URL || 'https://api.openai.com/v1', key: env.ASR_API_KEY, model: env.ASR_MODEL || 'whisper-1' };
   const volc = { key: env.VOLC_ASR_API_KEY, url: env.VOLC_ASR_URL, resourceId: env.VOLC_ASR_RESOURCE_ID, ffmpeg: env.FFMPEG_PATH || 'ffmpeg' };
@@ -36,7 +39,7 @@ export function createService(env = process.env, fetchImpl = fetch) {
     let url;
     try { url = new URL(req.url, 'http://localhost'); } catch { return send(400, { error: '请求地址无效。' }); }
     if (url.pathname.startsWith('/api/') && !authorize(req.headers.authorization?.replace(/^Bearer /, ''))) return send(401, { error: '网关访问码缺失或不正确，请在“分析设置”填写设备访问码。' });
-    if (req.method === 'GET' && url.pathname === '/api/health') return send(200, { ok: true, version: '0.5.0', analysisVersions: [1, 2], features: { batchAnalysis: true, automaticRoles: true, interviewSummary: true }, modelConfigured: !!(model.key && model.model), asrConfigured, nativeAppAsr: 'no-public-plugin-api-confirmed', model: { name: model.model || null, streaming: model.stream, configured: !!(model.key && model.model) }, asr: { name: useVolc ? '豆包流式语音识别 2.0 · Agent Plan' : asr.key ? asr.model : null, configured: asrConfigured, streaming: useVolc && !!volc.key, provider: useVolc ? 'volcengine' : 'openai-compatible', maxBytes: MAX_AUDIO_BYTES }, configurationIsNotVerification: true });
+    if (req.method === 'GET' && url.pathname === '/api/health') return send(200, { ok: true, version: '0.6.0', voice: voice.status(), analysisVersions: [1, 2], features: { batchAnalysis: true, automaticRoles: true, interviewSummary: true }, modelConfigured: !!(model.key && model.model), asrConfigured, nativeAppAsr: 'no-public-plugin-api-confirmed', model: { name: model.model || null, streaming: model.stream, configured: !!(model.key && model.model) }, asr: { name: useVolc ? '豆包流式语音识别 2.0 · Agent Plan' : asr.key ? asr.model : null, configured: asrConfigured, streaming: useVolc && !!volc.key, provider: useVolc ? 'volcengine' : 'openai-compatible', maxBytes: MAX_AUDIO_BYTES }, configurationIsNotVerification: true });
     if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
       if (env.SERVE_WEB === 'false') return send(404, { error: '页面不存在。' });
       try {
@@ -47,7 +50,10 @@ export function createService(env = process.env, fetchImpl = fetch) {
       } catch { send(404, { error: '页面不存在。请先运行 npm run build。' }); }
       return;
     }
-    if (req.method !== 'POST' || !['/api/analyze', '/api/checklist', '/api/transcribe', '/api/identify-speakers', '/api/summarize'].includes(url.pathname)) return send(404, { error: '接口不存在。' });
+    if (req.method === 'GET' && url.pathname === '/api/voice/status') {
+      try { return send(200, await voice.handle('status', {}, req.headers.authorization)); } catch { return send(503, {error:'声音服务状态读取失败。'}); }
+    }
+    if (req.method !== 'POST' || !['/api/analyze', '/api/checklist', '/api/transcribe', '/api/identify-speakers', '/api/summarize', '/api/participant-background', '/api/voice/enroll', '/api/voice/delete-host', '/api/voice/match', '/api/voice/end'].includes(url.pathname)) return send(404, { error: '接口不存在。' });
     if (inflight >= 3) return send(429, { error: '正在处理其他片段，请稍后重试。' });
     inflight++;
     const controller = new AbortController();
@@ -77,6 +83,7 @@ export function createService(env = process.env, fetchImpl = fetch) {
         send(200, { text: result.text });
       } else {
         let input; try { input = JSON.parse(body.toString('utf8')); } catch { throw new Error('请求 JSON 无效。'); }
+        if (url.pathname.startsWith('/api/voice/')) { send(200, await voice.handle(url.pathname.split('/').at(-1), input, req.headers.authorization, controller.signal)); return; }
         const streaming = req.headers.accept?.includes('application/x-ndjson');
         const event = data => { if (!res.destroyed) res.write(JSON.stringify(data) + '\n'); };
         if (streaming) {
@@ -87,6 +94,7 @@ export function createService(env = process.env, fetchImpl = fetch) {
         const run = async () => {
           if (url.pathname === '/api/analyze') return { result: await analyze(input, model, options) };
           if (url.pathname === '/api/identify-speakers') return { result: await identifyRoles(input, model, options) };
+          if (url.pathname === '/api/participant-background') return {result:await participantBackground(input,model,options)};
           if (url.pathname === '/api/summarize') return { result: await summarize(input, model, { ...options, onProgress: streaming ? progress => event({type:'progress',...progress}) : undefined }) };
           return { items: await checklist(input, model, options) };
         };
@@ -100,6 +108,7 @@ export function createService(env = process.env, fetchImpl = fetch) {
     } finally { inflight--; res.off('close', onClose); }
     // 不写入音频、对话文本、模型响应或密钥；上游服务留存规则由服务提供方决定。
   });
+  server.on('close', () => voice.close());
   attachAsrSocket(server, useVolc ? volc : {}, isAllowed, { authorize });
   return server;
 }

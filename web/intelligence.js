@@ -14,6 +14,7 @@ export function validateRoles(raw, ctx) {
   }) };
 }
 export function applyRoles(s, raw, ctx) {
+  if(s.identityMode==='voice')return [];
   const {assignments} = validateRoles(raw,ctx), eligible=assignments.filter(a=>a.confidence>=0.9);
   const groups = new Map();
   for(const a of eligible) {const key=a.speakerKey || a.segmentId; if(!groups.has(key))groups.set(key,new Set());groups.get(key).add(a.role);}
@@ -32,12 +33,12 @@ export function applyRoles(s, raw, ctx) {
   return changed;
 }
 export function summaryContext(topic,s) {
-  return {topic:topic.title,goal:s.goal,items:s.items.map(i=>({id:i.id,label:i.label,question:i.question})),segments:s.segments.map(x=>({id:x.id,text:x.text,role:x.role,roleSource:x.roleSource||null})),questions:s.questions.slice(-500).map(q=>({id:q.id,itemId:q.itemId,text:q.text,status:q.status}))};
+  return {topic:topic.title,goal:s.goal,items:s.items.map(i=>({id:i.id,label:i.label,question:i.question})),segments:s.segments.filter(x=>x.phase!=='opening').map(x=>({id:x.id,text:x.text,role:x.role,roleSource:x.roleSource||null,...(x.participantId?{participantId:x.participantId}:{})})),...(s.identityMode==='voice'?{identityMode:'voice',participants:s.participants}:{}),questions:s.questions.slice(-500).map(q=>({id:q.id,itemId:q.itemId,text:q.text,status:q.status}))};
 }
 export function validateSummary(raw,ctx) {
   const cite = p => {
     if(!nonempty(p?.text,1600)||!Array.isArray(p.sources)||!p.sources.length||p.sources.length>8)throw new Error('归纳要点缺少出处。');
-    return {text:p.text,sources:p.sources.map(ref=>{const s=ctx.segments.find(s=>s.id===ref.segmentId);if(!s||s.role!=='guest'||!nonempty(ref.quote,1200)||!s.text.includes(ref.quote))throw new Error('归纳引文或嘉宾归属无效。');return {segmentId:s.id,quote:ref.quote};})};
+    return {text:p.text,sources:p.sources.map(ref=>{const s=ctx.segments.find(s=>s.id===ref.segmentId);if(!s||s.role!=='guest'||s.phase==='opening'||(ctx.identityMode==='voice'&&!s.participantId)||!nonempty(ref.quote,1200)||!s.text.includes(ref.quote))throw new Error('归纳引文或嘉宾归属无效。');if(ref.participantId && ref.participantId!==s.participantId)throw new Error('归纳人物归属无效。');return {segmentId:s.id,quote:ref.quote,...(s.participantId?{participantId:s.participantId}:{})};})};
   };
   if(!Array.isArray(raw?.overview)||raw.overview.length>5||!Array.isArray(raw.chapters)||raw.chapters.length!==ctx.items.length||!Array.isArray(raw.followUps)||raw.followUps.length>12)throw new Error('访谈归纳结构无效。');
   const used=new Set();

@@ -1,3 +1,4 @@
+import { segmentLabel } from './participants.js';
 // Product helpers shared by UI, exports and regression tests.
 export function parseOutline(value) {
   const rows = String(value || '').split(/\r?\n/).map(x => x.replace(/^\s*(?:#{1,6}\s*|[-*•]\s*|\d+[.)、]\s*)/, '').trim()).filter(Boolean);
@@ -6,11 +7,11 @@ export function parseOutline(value) {
 }
 export function sourcePosition(session, id) {
   const seg = session.segments.find(x => x.id === id), asr = seg?.asr;
-  if (!asr || !Number.isFinite(asr.startMs) || !Number.isFinite(asr.endMs) || asr.timingUnavailable) return '文字片段 · 无音频时间';
+  if (!asr || !Number.isFinite(asr.startMs) || !Number.isFinite(asr.endMs) || asr.timingUnavailable) return `${seg?.participantId?segmentLabel(session,seg)+' · ':''}文字片段 · 无音频时间`;
   const streams = [...new Set(session.segments.filter(x => x.asr).map(x => x.asr.streamId || x.asr.key?.split(':')[0] || 'legacy'))];
   const stream = asr.streamId || asr.key?.split(':')[0] || 'legacy';
   const time = ms => { const seconds = Math.floor(Math.max(0, ms) / 1000); return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2,'0')}`; };
-  return `采集段 ${streams.indexOf(stream)+1} · ${time(asr.startMs)}–${time(asr.endMs)}`;
+  return `${seg?.participantId?segmentLabel(session,seg)+' · ':''}采集段 ${streams.indexOf(stream)+1} · ${time(asr.startMs)}–${time(asr.endMs)}`;
 }
 export function compactHint(q) {
   if (!q) return '';

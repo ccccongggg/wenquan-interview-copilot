@@ -7,3 +7,8 @@ release/
 evidence/
 *.log
 .DS_Store
+
+.local-deliverables/
+
+__pycache__/
+*.pyc

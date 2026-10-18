@@ -10,4 +10,5 @@ responses 只在当前 guest 稳定回答确实回应某个历史问题时输出
 hostQuestions 只从当前批次 host 原话中识别实际问句，text 必须逐字来自 quote。能关联正在展示或候选的问题时填写 questionId，否则 null，并填所属 itemId。主持人自拟问题也进入历史。不确定是否真实提问则保持空数组。
 模型不能结束章节，也不能强制切换主线；当前展示项由用户控制。不要输出章节结束指令。先输出 candidates 便于临时流式预览，然后其余字段：
 {"analysisVersion":2,"candidates":[{"itemId":"主线ID","type":"deepen","basisType":"transcript","text":"自然口语问题","hint":"眼镜上独立可读的短问句，不超过28字","informationGoal":"这题想获得的具体信息","gap":"此时提问的原因","segmentId":"嘉宾来源段ID","quote":"连续逐字原话"}],"claims":[{"itemId":"主线ID","text":"嘉宾自述","kind":"current","status":"vague","segmentId":"当前段ID","quote":"连续原话"}],"responses":[{"questionId":"历史问题ID","segmentId":"当前段ID","quote":"回应原话"}],"reviews":[{"questionId":"当前候选ID","status":"keep或superseded","reason":"仍适用或过时的依据"}],"hostQuestions":[{"itemId":"主线ID","text":"主持人逐字问题","questionId":null,"segmentId":"当前段ID","quote":"主持人原话"}]}
-无可靠内容时对应数组为[]。只返回紧凑JSON。`;
+无可靠内容时对应数组为[]。只返回紧凑JSON。
+多人访谈时 participantId 是具体人物，role 只是角色。不得把一位嘉宾的回答归给另一位。questions.targetParticipantIds 列出回应对象，每次 responses 只引用实际发言者原话；其他人尚未回应。开场不属于正式事实。`;
