@@ -2,13 +2,19 @@
 
 帮助主持人在认真听回答的同时，抓住值得追问的细节，并在访谈后整理带出处的素材。
 
+## 现场与产品
+
+| AI 眼镜样机（迷途羔羊队） | 京东 AIdol 创造营现场 |
+| --- | --- |
+| ![AI 眼镜样机](docs/assets/aidol-2026-glasses.jpg) | ![AIdol 创造营现场](docs/assets/aidol-2026-workshop.jpg) |
+
 ## 当前版本 V0.6.0（2026-10-18，本地预览）
 
-用户将本轮声音身份与多人建档版本由 v0.5.6 调整为 V0.6.0。新源码位于 `E:/JingDongHacthoh/wenquan-interview-copilot-v0.6.0`，分支 `feat/0.6.0-voice-identity`。v0.5.6 原源码、文档、模型资料和安装包全部保留。
+用户将本轮声音身份与多人建档版本由 v0.5.6 调整为 V0.6.0。本轮源码在独立本地工作树，分支 `feat/0.6.0-voice-identity`。v0.5.6 原源码、文档、模型资料和安装包全部保留。
 
 包元数据、手机页脚、后端健康版本、测试断言、构建与模型资料目录均同步改为0.6.0。功能范围保持主持人预录、嘉宾现场依次单人建档；仍属开发预览，尚未完成真实六人设备验收，线上后端未部署。
 
-Studio工作区：`E:/JingDongHacthoh/studio-demo-0.6.0`。本机服务可执行 `npm run start:studio`，默认127.0.0.1:8790；本轮预览使用8798端口，避免占用其他版本。模型和加密配置位于本工作树忽略的 `.env.voice.local`，勿提交。仅Studio预览包允许使用回环后端，不能将其扫码装到手机后当作线上服务。
+Studio 工作区为独立本地预览目录（含 PhoneSDK 与 GlassSDK）。本机服务可执行 `npm run start:studio`，默认127.0.0.1:8790；本轮预览使用8798端口，避免占用其他版本。模型和加密配置位于本工作树忽略的 `.env.voice.local`，勿提交。仅Studio预览包允许使用回环后端，不能将其扫码装到手机后当作线上服务。
 
 以下保留 v0.5.6 阶段说明，历史路径和检查结果不自动作为 V0.6.0 的新验收证据。
 
@@ -24,7 +30,7 @@ Studio工作区：`E:/JingDongHacthoh/studio-demo-0.6.0`。本机服务可执行
 
 本轮本机前端包：`.local-deliverables/v0.5.6/build-004/wenquan-0.5.6.mmpkg`。构建读取已有 SDK，只更新本工作树 `dist` 并创建递增的新构建目录，不覆盖已有包或共享 SDK；包内不包含后端声音模型、加密密钥或服务器凭据。没有提交 GitHub、发布或部署。可选 `deploy/Dockerfile.voice` 为 CPU 后端部署准备，尚未构建或部署容器。
 
-当前正式方案与报告见原仓库 `E:/JingDongHacthoh/wenquan-interview-copilot/docs/versions/v0.5.6/` 的修订03方案、修订02阶段验证报告与本地接入说明。v0.5.5 说明保留如下，仅作为历史基线。
+当前正式方案与报告见仓库内 `docs/versions/v0.5.6/` 的修订03方案、修订02阶段验证报告与本地接入说明。v0.5.5 说明保留如下，仅作为历史基线。
 
 ## 以下为 v0.5.5 基线历史说明（2026-10-17）
 
@@ -58,7 +64,7 @@ Studio工作区：`E:/JingDongHacthoh/studio-demo-0.6.0`。本机服务可执行
 3. 会中先听回答，眼镜显示一条可选建议和主线上下文。实际自拟问题也可记录，已问与已回应分别管理。
 4. 点击“结束并整理”，生成整场核心内容、按主线归纳与待补问；要点带嘉宾原话出处，章节摘要可编辑并导出 Markdown。
 
-队友安装入口：[0.5.5 发布页](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/releases/tag/v0.5.5) · [下载 Studio 组合包](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/releases/download/v0.5.5/wenquan-0.5.5-Studio.zip)。下载 `wenquan-0.5.5-Studio.zip`，将整个 ZIP 导入 MemoMind Studio 后扫码安装；允许网络和录音权限，手机联网即可使用预置云端服务，无需手动填写设备访问码。安装请选发布附件，自动生成的 Source code 是源码归档。
+0.5.5 历史组合包仍托管在原公开发布页：[0.5.5 发布页](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/releases/tag/v0.5.5) · [下载 Studio 组合包](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/releases/download/v0.5.5/wenquan-0.5.5-Studio.zip)；本仓库 Releases 暂未挂包。下载 `wenquan-0.5.5-Studio.zip`，将整个 ZIP 导入 MemoMind Studio 后扫码安装；允许网络和录音权限，手机联网即可使用预置云端服务，无需手动填写设备访问码。安装请选发布附件，自动生成的 Source code 是源码归档。
 
 本地安装包（与发布附件内容一致）：
 
@@ -71,9 +77,9 @@ Studio 已加载 0.5.5，显示“推荐组合：眼镜协议完全匹配”。�
 
 ## 源码与版本
 
-[GitHub main](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/tree/main) 为当前源码入口。0.5.2 浅色 UI 提交为 `88ba6f43527b3044b3475910e2562a6821092599`，0.5.3 新增 AIdol 快访模板（`47ba4660a9c18701b1b75d692dbc43eb8e1cde0e`）；0.5.4 修复手机存储单项容量限制，对应提交 `ce6093b2a92b321bf5daa75038bfcdb78afacb38`；0.5.5 增加主线建议，开发分支为 `feat/0.5.5-guided-suggestions`。
+[GitHub main](https://github.com/ccccongggg/wenquan-interview-copilot/tree/main) 为当前源码入口。0.5.2 浅色 UI 提交为 `88ba6f43527b3044b3475910e2562a6821092599`，0.5.3 新增 AIdol 快访模板（`47ba4660a9c18701b1b75d692dbc43eb8e1cde0e`）；0.5.4 修复手机存储单项容量限制，对应提交 `ce6093b2a92b321bf5daa75038bfcdb78afacb38`；0.5.5 增加主线建议，开发分支为 `feat/0.5.5-guided-suggestions`。
 
-[GitHub v0.5.1 标签](https://github.com/miaodaxia80-droid/wenquan-interview-copilot/tree/v0.5.1) 保留在 `b2e1380011bdf0abc9661b01e56b6bde416b9203`，包含原有 reviews / interviewSummary 修复。
+[v0.5.1 提交](https://github.com/ccccongggg/wenquan-interview-copilot/tree/b2e1380011bdf0abc9661b01e56b6bde416b9203) 保留在 `b2e1380011bdf0abc9661b01e56b6bde416b9203`，包含原有 reviews / interviewSummary 修复。
 
 历史说明见 [0.5.1 README 存档](docs/README_0.5.1历史.md)、[0.5.1 眼镜 UI 验收](docs/眼镜端UI_0.5.1_2026-10-17.md)、[0.5.0 效率迭代](docs/产品效率迭代_0.5.0_2026-10-17.md)。历史示例文档保留用于追溯，当前产品已移除体验示例入口。
 
